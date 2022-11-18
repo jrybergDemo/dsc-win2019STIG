@@ -1,0 +1,6 @@
+key                  = "dsc-compilation-win2019STIG.tfstate"
+environment          = "usgovernment"
+resource_group_name  = "S-VA-DEMO-COR-TFSTATE"
+storage_account_name = "svademotfstatedata"
+container_name       = "s-va-demo-cor-tfstate"
+use_msi              = true

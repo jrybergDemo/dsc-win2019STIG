@@ -1,0 +1,87 @@
+name: sbx-distribution
+
+env:
+  AUTOMATION_ACCOUNT_LIST: '{
+    "S-TX-DEMO-INFRA-AUTO": {
+      location: "usgovtexas",
+      rg_name:  "S-TX-DEMO-INFRA-AUTOMATION"
+    },
+    "S-VA-DEMO-INFRA-AUTO": {
+      location: "usgovvirginia",
+      rg_name:  "S-VA-DEMO-INFRA-AUTOMATION"
+    }
+  }'
+  AZURE_E_NAAS_SP_CREDS:   ${{ secrets.AZURE_S_DEMO_NAAS_SP }}
+  DSC_CONFIGURATION_NAME:  win2019STIG
+
+on:
+  push:
+    branches: [main]
+    paths:
+    - ".github/workflows/sbx-distribution.yml"
+    - "terraform/**"
+    - "DSC/**"
+    - '!README.md'
+    - '!LICENSE'
+
+jobs:
+  dscnodeconfiguration:
+    name:    Compile DSC Node Config
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v2.3.4
+
+    - name:  Compile DSC Config
+      shell: powershell
+      run:   |
+        Write-Host 'Installing PowerSTIG'
+        $null = Install-Module -Name 'PowerSTIG' -RequiredVersion '4.11.0' -Scope CurrentUser -Force
+
+        Write-Host "Executing Configuration at ${{ github.workspace}}/DSC/${{ env.DSC_CONFIGURATION_NAME }}.ps1"
+        . ${{ github.workspace}}/DSC/${{ env.DSC_CONFIGURATION_NAME }}.ps1
+        ${{ env.DSC_CONFIGURATION_NAME }}
+        ls
+
+    - name: Connect to Infra Subscription
+      uses: azure/login@v1
+      with:
+        creds:              ${{ env.AZURE_E_NAAS_SP_CREDS }}
+        environment:        AzureUSGovernment
+        enable-AzPSSession: true
+
+    - name:  Import DSC Config
+      shell: pwsh
+      run:   |
+        Write-Host 'Installing AZ Modules'
+        $null = Install-Module -Name 'Az.Automation' -Scope CurrentUser -Force
+        $aaInfo = $env:AUTOMATION_ACCOUNT_LIST | ConvertFrom-Json -AsHashTable
+        ForEach ($aa in $aaInfo.GetEnumerator()) {
+          Write-Host "Importing '$($env:DSC_CONFIGURATION_NAME)' DSC Config to $($aa.Name) in $($aa.Value.rg_name)"
+          $null = Import-AzAutomationDscNodeConfiguration `
+            -Path '${{ github.workspace}}/win2019STIG/localhost.mof' `
+            -ConfigurationName $env:DSC_CONFIGURATION_NAME `
+            -ResourceGroupName $aa.Value.rg_name `
+            -AutomationAccountName $aa.Name `
+            -Force
+        }
+
+    - name:  Assert DSC Config
+      shell: pwsh
+      run:   |
+        $aaInfo = $env:AUTOMATION_ACCOUNT_LIST | ConvertFrom-Json -AsHashTable
+        $now = Get-Date
+        ForEach ($aa in $aaInfo.GetEnumerator()) {
+          Write-Host "Retrieving '$($env:DSC_CONFIGURATION_NAME).localhost' DSC Node Config from $($aa.Name) in $($aa.Value.rg_name)"
+          $config = Get-AzAutomationDscNodeConfiguration `
+            -Name "$($env:DSC_CONFIGURATION_NAME).localhost" `
+            -ResourceGroupName $aa.Value.rg_name `
+            -AutomationAccountName $aa.Name
+
+          # throw if the config is more than ten minutes old 
+          # (will likely throw if not using the compiled config from the same workflow run)
+          if ($config.LastModifiedTime.DateTime -lt $now.AddMinutes(-10))
+          {
+            throw "Old configuration detected (import time of '$($config.LastModifiedTime.DateTime.ToString())'). Please ensure configuration was imported successfully."
+          }
+        }

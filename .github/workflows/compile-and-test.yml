@@ -1,0 +1,285 @@
+name: compile-and-test
+
+env:
+  ADMIN_GH_TOKEN_PAT:    ${{ secrets.GH_TOKEN_PAT }}
+  ARM_CLIENT_ID:         ${{ secrets.AZURE_S_DEMO_CAS_SP_CLIENT_ID }}
+  ARM_CLIENT_SECRET:     ${{ secrets.AZURE_S_DEMO_CAS_SP_CLIENT_SECRET }}
+  ARM_ENVIRONMENT:       usgovernment
+  ARM_PARTNER_ID:        ${{ secrets.AZURE_CUA_ID }}
+  ARM_SUBSCRIPTION_ID:   ${{ secrets.AZURE_S_DEMO_CAS_SP_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID:         ${{ secrets.AZURE_S_DEMO_CAS_SP_TENANT_ID }}
+  AZURE_E_CAS_SP_CREDS:  ${{ secrets.AZURE_S_DEMO_CAS_SP }}
+  AZURE_E_NAAS_SP_CREDS: ${{ secrets.AZURE_S_DEMO_NAAS_SP }}
+  AZURE_GOV_ENV:         AzureUSGovernment
+
+  AUTOMATION_ACCOUNT_LIST: '{
+    "S-TX-DEMO-INFRA-AUTO": {
+      location: "usgovtexas",
+      rg_name:  "S-TX-DEMO-INFRA-AUTOMATION"
+    },
+    "S-VA-DEMO-INFRA-AUTO": {
+      location: "usgovvirginia",
+      rg_name:  "S-VA-DEMO-INFRA-AUTOMATION"
+    }
+  }'
+  DSC_CONFIGURATION_NAME:  win2019STIG
+  OS_PLATFORM:             windows
+  UPDATE_TYPE:             generic_windows
+
+  TF_VAR_admin_name_secret_value:     demoadmin
+  TF_VAR_admin_password_secret_value: S3cretP@ss0wrdV4lue
+  TF_VAR_automation_account_name:     S-VA-DEMO-CAS-AUTO
+  TF_VAR_automation_account_rg_name:  S-VA-DEMO-CAS-AUTOMATION
+  TF_VAR_admin_name_secret_name:      windowsdsc-admin-name
+  TF_VAR_admin_password_secret_name:  windowsdsc-admin-pswd
+  TF_VAR_asg_name:                    win2019STIGDSC-asg
+  TF_VAR_availability_set_name:       win2019STIGDSC-avail-set
+  TF_VAR_backup_policy_name:          S-VA-DEMO-CAS-VMBACKUP
+  TF_VAR_des_key_name:                win2019STIGDSC-des
+  TF_VAR_des_name:                    ci-win2019STIGDSC-des
+  TF_VAR_dsc_node_configuration_name: win2019STIG.localhost
+  TF_VAR_hostname_FQDN:               ci-win19STIGDSC.usgovvirginia.cloudapp.usgovcloudapi.net
+  TF_VAR_image_name:                  win2019STIG
+  TF_VAR_image_rg_name:               S-VA-DEMO-CAS-IMAGEGALLERY
+  TF_VAR_image_version:               base
+  TF_VAR_key_vault_name:              ci-win2019STIG-vault
+  TF_VAR_location:                    usgovvirginia
+  TF_VAR_nic_name:                    win2019STIGDSC-nic
+  TF_VAR_pip_name:                    win2019STIGDSC-pip
+  TF_VAR_nsg_name:                    win2019STIGDSC-nsg
+  TF_VAR_rg_name:                     ci-win2019STIG
+  TF_VAR_shutdown_time:               2359
+  TF_VAR_shutdown_timezone:           Pacific Standard Time
+  TF_VAR_subnet_name:                 win2019STIG-subnet
+  TF_VAR_subnet_range:                10.1.2.32/29
+  TF_VAR_vm_name:                     ci-win19STIGDSC
+  TF_VAR_vnet_name:                   S-VA-DEMO-CAS-BASTION
+  TF_VAR_vnet_rg_name:                S-VA-DEMO-CAS-BASTION
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+    - ".github/workflows/compile-and-test.yml"
+    - "terraform/**"
+    - "DSC/**"
+    - '!README.md'
+    - '!LICENSE'
+
+jobs:
+  dscnodeconfiguration:
+    name:    Compile DSC Node Config
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v2.3.4
+
+    - name:  Compile DSC Config
+      shell: powershell
+      run:   |
+        Write-Host 'Installing PowerSTIG'
+        $null = Install-Module -Name 'PowerSTIG' -RequiredVersion '4.11.0' -Scope CurrentUser -Force
+
+        Write-Host "Executing Configuration at ${{ github.workspace}}/DSC/${{ env.DSC_CONFIGURATION_NAME }}.ps1"
+        . ${{ github.workspace}}/DSC/${{ env.DSC_CONFIGURATION_NAME }}.ps1
+        ${{ env.DSC_CONFIGURATION_NAME }}
+
+    - name: Create Compiled Config Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: compiled-config
+        path: ${{ github.workspace}}/${{ env.DSC_CONFIGURATION_NAME }}/localhost.mof
+
+    - name: Connect to CAS Subscription
+      uses: azure/login@v1
+      with:
+        creds:              ${{ env.AZURE_E_CAS_SP_CREDS }}
+        environment:        ${{ env.AZURE_GOV_ENV }}
+        enable-AzPSSession: true
+
+    - name:  Import DSC Config
+      shell: pwsh
+      run:   |
+        Write-Host 'Installing AZ Modules'
+        $null = Install-Module -Name 'Az.Automation' -Scope CurrentUser -Force
+
+          Write-Host "Importing '$($env:DSC_CONFIGURATION_NAME)' DSC Config to '$($env:TF_VAR_automation_account_name)'' in '$($env:TF_VAR_automation_account_rg_name)'"
+          Import-AzAutomationDscNodeConfiguration `
+            -Path '${{ github.workspace}}\${{ env.DSC_CONFIGURATION_NAME }}\localhost.mof' `
+            -ConfigurationName $($env:DSC_CONFIGURATION_NAME) `
+            -ResourceGroupName $($env:TF_VAR_automation_account_rg_name) `
+            -AutomationAccountName $($env:TF_VAR_automation_account_name) `
+            -Force
+
+    - name:  Assert DSC Config
+      shell: pwsh
+      run:   |
+          Write-Host "Retrieving '$($env:TF_VAR_dsc_node_configuration_name)' DSC Node Config from '$($env:TF_VAR_automation_account_name)'' in '$($env:TF_VAR_automation_account_rg_name)'"
+          $config = Get-AzAutomationDscNodeConfiguration `
+            -Name $env:TF_VAR_dsc_node_configuration_name `
+            -ResourceGroupName $($env:TF_VAR_automation_account_rg_name) `
+            -AutomationAccountName $($env:TF_VAR_automation_account_name)
+
+    - name:  Unregister Existing DSC Node
+      shell: pwsh
+      run:   |
+        Install-Module -Name 'Az.Automation' -Scope CurrentUser -Force | Out-Null
+
+        Write-Host "Target Automation Account: '$($env:TF_VAR_automation_account_name)' in resource group '$($env:TF_VAR_automation_account_rg_name)'"
+        $dscNode = Get-AzAutomationDscNode `
+          -AutomationAccountName $env:TF_VAR_automation_account_name `
+          -ResourceGroupName $env:TF_VAR_automation_account_rg_name `
+          -Name $env:TF_VAR_vm_name `
+          -ErrorAction SilentlyContinue
+
+        Write-Host 'Checking for duplicate nodes'
+        if ($dscNode.Count -gt 1)
+        {
+          throw "Duplicate nodes found - please clean up the '$env:TF_VAR_vm_name' nodes registered in Automation Account '$($env:TF_VAR_automation_account_name)' in resource group '$($env:TF_VAR_automation_account_rg_name)'"
+        }
+
+        if ($null -ne $dscNode)
+        {
+          $dscNode
+          Unregister-AzAutomationDscNode `
+            -AutomationAccountName $env:TF_VAR_automation_account_name `
+            -ResourceGroupName $env:TF_VAR_automation_account_rg_name `
+            -Id $dscNode.Id `
+            -Force
+        }
+        else
+        {
+          Write-Host "DSC Node '$($env:TF_VAR_vm_name)' was NOT registered in AA '$($env:TF_VAR_automation_account_name)' in resource group '$($env:TF_VAR_automation_account_rg_name)'"
+        }
+
+    - name:  Start VM & Remove Extension
+      shell: pwsh
+      run:   | # VM must be started to remove the extension https://github.com/terraform-providers/terraform-provider-azurerm/issues/6098
+        Write-Host "Installing 'Az.Compute' module"
+        Install-Module -Name 'Az.Compute' -Scope CurrentUser -Force | Out-Null
+
+        Write-Host "Starting VM $($env:TF_VAR_vm_name)"
+        try
+        {
+          Start-AzVM -Name $env:TF_VAR_vm_name -ResourceGroupName $env:TF_VAR_rg_name
+        }
+        catch
+        {
+          $_
+        }
+
+        Write-Host 'Removing VM Extension'
+        Remove-AzVMExtension -ResourceGroupName $env:TF_VAR_rg_name -VMName $env:TF_VAR_vm_name -Name 'Microsoft.Powershell.DSC' -Force
+
+  terraform:
+    needs:  [dscnodeconfiguration]
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Connect to Azure
+      uses: azure/login@v1
+      with:
+        creds:              ${{ env.AZURE_E_CAS_SP_CREDS }}
+        environment:        ${{ env.AZURE_GOV_ENV }}
+        enable-AzPSSession: true
+
+    - name: Install Terraform
+      uses: hashicorp/setup-terraform@v1
+
+    - name: Terraform
+      run:  |
+        cd terraform
+        terraform init -input=false -upgrade -backend-config=${{ github.workspace }}/.tfbackend/${{ github.workflow }}
+        terraform plan -input=false -out=tfplan
+        terraform apply -auto-approve tfplan
+      env:
+        TF_VAR_azure_tags:                  '{
+          applied_stig      = "${{ env.PKR_VAR_applied_stig }}",
+          gen_date          = "${{ needs.packer.outputs.gen_date }}",
+          image_ver         = "${{ env.PKR_VAR_image_name }}.${{ env.TF_VAR_image_version }}",
+          os_platform       = "${{ env.OS_PLATFORM }}",
+          source_gen_date   = "${{ needs.packer.outputs.gen_date }}",
+          source_name       = "${{ env.PKR_VAR_image_name }}",
+          source_offer      = "${{ env.PKR_VAR_image_offer }}",
+          source_publisher  = "${{ env.PKR_VAR_image_publisher }}",
+          source_sku        = "${{ env.PKR_VAR_image_sku }}",
+          update_deployment = "${{ env.UPDATE_TYPE }}"
+        }'
+
+  verifydscnoderegistration:
+    name:   Verify DSC Node Registration
+    needs:  [terraform]
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Connect to CAS Subscription
+      uses: azure/login@v1
+      with:
+        creds:              ${{ env.AZURE_E_CAS_SP_CREDS }}
+        environment:        ${{ env.AZURE_GOV_ENV }}
+        enable-AzPSSession: true
+
+    - name:  Verify DSC Node Registration
+      shell: pwsh
+      run:   |
+        Install-Module -Name 'Az.Automation' -Scope CurrentUser -Force | Out-Null
+
+        Write-Host "Checking for DSC Node '$($env:TF_VAR_vm_name)' in Automation Account '$($env:TF_VAR_automation_account_name)' in resource group '$($env:TF_VAR_automation_account_rg_name)'"
+        $dscNode = Get-AzAutomationDscNode `
+          -AutomationAccountName "$($env:TF_VAR_automation_account_name)" `
+          -ResourceGroupName "$($env:TF_VAR_automation_account_rg_name)" `
+          -Name $env:TF_VAR_vm_name
+
+        Write-Host "DSC Node status is $($dscNode.Status)"
+
+    - name:  Check VM Login
+      shell: pwsh
+      run:   |
+        Install-Module -Name 'Az.Compute'  -Scope CurrentUser -Force | Out-Null
+        Install-Module -Name 'Az.KeyVault' -Scope CurrentUser -Force | Out-Null
+        Install-Module -Name 'Az.Network'  -Scope CurrentUser -Force | Out-Null
+
+        $kvName       = $env:TF_VAR_key_vault_name
+        $VmUsername   = Get-AzKeyVaultSecret -VaultName $kvName -Name "${{ env.TF_VAR_admin_name_secret_name }}" -AsPlainText
+        $VmPassword   = Get-AzKeyVaultSecret -VaultName $kvName -Name "${{ env.TF_VAR_admin_password_secret_name }}" -AsPlainText
+
+        $vmName       = $env:TF_VAR_vm_name
+        $hostName     = $vmName.toLower()
+        $hostNameFQDN = "$hostName.usgovvirginia.cloudapp.usgovcloudapi.net"
+        $soptions     = New-PSSessionOption -SkipCACheck
+
+        try
+        {
+          $credential = (New-Object System.Management.Automation.PSCredential ("$vmName\$VmUsername", (ConvertTo-SecureString $VmPassword -AsPlainText -Force)))
+
+          Write-Host "Connecting to '$vmName' at '$hostNameFQDN'"
+          $session = New-PSSession -ComputerName $hostNameFQDN -Port '5986' -Credential $credential -SessionOption $soptions -UseSSL
+          if ($session)
+          {
+            Write-Host "Successfully authenticated with '$vmName' and established session."
+            $session | Remove-PSSession
+          }
+          else
+          {
+            Write-Host "Session could not be established on '$vmName'."
+          }
+        }
+        catch
+        {
+          Write-Warning $PSItem.Exception.Message
+          throw $_
+        }
+
+        Write-Host "Returning Public IP from the DSC Test VM"
+        $nic = Get-AzNetworkInterface -Name "$($env:TF_VAR_nic_name)" -ResourceGroup "$($env:TF_VAR_rg_name)"
+
+        Write-Host "Disassociating VM Public IP Address"
+        $nic.IpConfigurations.publicipaddress.id = $null
+        $null = Set-AzNetworkInterface -NetworkInterface $nic
+
+        # Write-Host "Deleting the Public IP Address"
+        # Remove-AzPublicIpAddress -Name "$($env:TF_VAR_pip_name)" -ResourceGroupName "$($env:TF_VAR_automation_account_rg_name)" -Force

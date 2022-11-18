@@ -1,0 +1,14 @@
+{
+    "automationAccountName": {
+        "value": "${automationAccountName}"
+    },
+    "moduleName": {
+        "value": "${moduleName}"
+    },
+    "contentLink": {
+        "value": "${contentLink}"
+    },
+    "location": {
+        "value": "${location}"
+    }
+  }
